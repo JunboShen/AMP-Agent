@@ -1,0 +1,67 @@
+# AMP Multi-Agent Workflow & Data Pipeline
+Generated: 2025-12-09T11:48:40
+
+Plain-language Mermaid diagrams describing (1) how the agents collaborate and (2) how raw metagenomic reads are processed into prioritized antimicrobial peptide (AMP) candidates. View with any Mermaid-enabled Markdown renderer or paste into https://mermaid.live .
+
+## Agent orchestration (who does what)
+```mermaid
+flowchart LR
+    subgraph Orchestration
+        U[Human PI / User Proxy<br/>Sets objectives, approves actions]
+        P[Planner<br/>Drafts study plan + selects tools]
+        C[Critic<br/>Checks feasibility and parameter choices]
+        M[ML_Coder<br/>Writes end-to-end training/inference code (if needed)]
+        E[Executor<br/>Runs ML_Coder code in workspace]
+        S[Assistant<br/>Prepares inputs, runs approved tools, reports results]
+    end
+    subgraph Tools["agent_functions.py toolbox"]
+        T1[download_top_fastq_and_build_smorf<br/>ENA taxon search → QC → assembly → smORFs]
+        T2[write_mature_faa_by_predicted_cleavage<br/>USPNet signal peptide trimming to mature peptide (if needed)]
+        T3[amp_predict_fasta / amp_then_mic_from_fasta<br/>ESM2+LoRA AMP classification]
+        T4[mic_predict_csv<br/>ESM2+LoRA MIC regression]
+        T5[augment_with_toxicity_and_hemolysis<br/>ToxinPred3 + HemoPI2 safety filters]
+        T6[amp_esm_similarity_and_sequence_identity<br/>ESM embedding similarity + sequence identity vs DBAASP]
+        T7[fetch_amps<br/>Curated AMP reference set (DBAASP)]
+    end
+
+    U --> P
+    P --> C
+    C -->|feedback| P
+    P --> M
+    M --> E
+    E --> S
+    P --> S
+    S --> T1
+    S --> T2
+    S --> T3
+    S --> T4
+    S --> T5
+    S --> T6
+    S --> T7
+    T1 -.-> S
+    T2 -.-> S
+    T3 -.-> S
+    T4 -.-> S
+    T5 -.-> S
+    T6 -.-> S
+    T7 -.-> S
+    S --> U
+```
+
+## Experimental/analytical pipeline (from reads to ranked AMPs)
+```mermaid
+flowchart TD
+    R[Metagenomic paired-end reads<br/>(downloaded via ENA taxon keyword)] --> FP[Quality control (fastp)]
+    FP --> ASM[Assembly (metaSPAdes)]
+    ASM --> ORF[Gene calling for smORFs (pyrodigal)]
+    ORF --> SP[Signal peptide detection (USPNet) and trimming to mature peptides]
+    SP --> AMP[AMP screening (ESM2+LoRA classifier)]
+    AMP --> Filt[Keep sequences above AMP probability threshold and optional top_k]
+    Filt --> MIC[MIC estimation per pathogen (ESM2+LoRA regression)]
+    MIC --> Tox[Toxicity & hemolysis annotation (ToxinPred3.0 + HemoPI2)]
+    Tox --> Sim[Novelty assessment (ESM similarity + sequence identity vs DBAASP)]
+    Sim --> Rank[Ranked export (CSV/FASTA) of candidate AMPs]
+    Fetch[Verified AMPs from DBAASP (fetch_amps)] --> Sim
+    Train[Custom AMP/MIC training scripts from ML_Coder] --> AMP
+    Train --> MIC
+```
