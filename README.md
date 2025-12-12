@@ -2,7 +2,7 @@
 
 Multi-agent workflows for antimicrobial peptide (AMP) modeling and screening.
 
-![AMP-Agent pipeline overview](pepagent/assets/amp_agent_pipeline.png)
+<img src="pepagent/assets/amp_agent_pipeline.png" alt="AMP-Agent pipeline overview" width="900" />
 
 This project uses an AutoGen-style agent team (Planner/Critic/ML_Coder/Executor/Assistant) plus a toolbox of vetted Python functions to:
 
@@ -53,6 +53,30 @@ Environment variables (see `.env.example`):
 - `pepagent/agent_functions.py`: “toolbox” functions callable by agents (I/O helpers, screening utilities, etc.).
 - `pepagent/workspace/`: local scratch space (ignored by git except the Mermaid diagram + README).
 - `pepagent/USPNet/`: signal peptide prediction code (third-party; see `pepagent/USPNet/LICENSE`).
+
+## Model files (checkpoints)
+
+This repo does not ship large model checkpoints by default (see `.gitignore`).
+
+- AMP classifier: set `PEPAGENT_AMP_MODEL_DIR` to a local directory containing the required checkpoint artifacts (e.g., `tokenizer/`, `lora_adapter/`, and weights such as `classifier_weights.pth`).
+- MIC regressor: set `PEPAGENT_MIC_MODEL_DIR` similarly (e.g., `tokenizer/`, `lora_adapter/`, and `regression_head.pth`).
+
+If you need access to pretrained/fine-tuned checkpoints used in our experiments, please contact the maintainers.
+
+## Data and outputs
+
+- Example/small data may live under `pepagent/data/`.
+- Intermediate outputs (CSVs/FASTA/logs) are written to `pepagent/workspace/` by default and are intentionally ignored by git.
+
+## Contact
+
+- For questions, please open a GitHub Issue.
+- For checkpoint/data files download requests: contact the GitHub repository owner via email.
+
+## License
+
+- Project license: **MIT** (see `LICENSE`).
+- Third-party components: `pepagent/USPNet/` is distributed with its own license (`pepagent/USPNet/LICENSE`).
 
 ## Notes
 
