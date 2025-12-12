@@ -3,6 +3,7 @@
 Multi-agent workflows for antimicrobial peptide (AMP) modeling and screening.
 
 This project uses an AutoGen-style agent team (Planner/Critic/ML_Coder/Executor/Assistant) plus a toolbox of vetted Python functions to:
+
 - generate or refine AMP training/inference code (LLM-assisted),
 - screen peptide FASTA files for AMP likelihood and predicted MIC,
 - annotate candidates with toxicity/hemolysis signals (optional),
@@ -14,14 +15,13 @@ The high-level pipeline is captured in `pepagent/workspace/amp_pipeline_diagram.
 ## Demos (notebooks)
 
 - `pepagent/code_exp.ipynb`: example “coder agent” workflow for generating AMP model training/inference code (e.g., ESM-family fine-tuning).
-- `pepagent/exp1.ipynb`: example screening workflow (FASTA → AMP candidates → MIC prediction → optional safety filters / analysis).
+- `pepagent/amp_discover_exp1.ipynb`: example screening workflow (FASTA → AMP candidates → MIC prediction → optional safety filters / analysis).
 
 Notebooks are checked in **without outputs** and read credentials from environment variables.
 
 ## Quickstart
 
 1) Create and activate an environment (Python 3.10+ recommended).
-
 2) Configure credentials and paths:
 
 - Copy `.env.example` → `.env` (do not commit) and fill values, or export env vars in your shell.
@@ -36,6 +36,7 @@ Notebooks are checked in **without outputs** and read credentials from environme
 ## Configuration
 
 Environment variables (see `.env.example`):
+
 - `OPENAI_API_KEY`: required for LLM-backed agents.
 - `OPENAI_BASE_URL`: optional; defaults to OpenAI if unset.
 - `HF_TOKEN`: optional; used for Hugging Face model downloads when needed.
