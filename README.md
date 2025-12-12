@@ -2,6 +2,8 @@
 
 Multi-agent workflows for antimicrobial peptide (AMP) modeling and screening.
 
+![AMP-Agent pipeline overview](pepagent/assets/amp_agent_pipeline.png)
+
 This project uses an AutoGen-style agent team (Planner/Critic/ML_Coder/Executor/Assistant) plus a toolbox of vetted Python functions to:
 
 - generate or refine AMP training/inference code (LLM-assisted),
