@@ -52,7 +52,14 @@ Environment variables (see `.env.example`):
 - `pepagent/llm_config.py`: LLM/tool configuration (no credentials in-code).
 - `pepagent/agent_functions.py`: “toolbox” functions callable by agents (I/O helpers, screening utilities, etc.).
 - `pepagent/workspace/`: local scratch space (ignored by git except the Mermaid diagram + README).
-- `pepagent/USPNet/`: signal peptide prediction code (third-party; see `pepagent/USPNet/LICENSE`).
+- `pepagent/USPNet/`: USPNet signal peptide prediction package (see details below; licensed under `pepagent/USPNet/LICENSE`).
+
+## USPNet (signal peptide prediction)
+
+`pepagent/USPNet/` contains **USPNet / USPNet-fast**, a signal peptide predictor (Nature Computational Science, 2024).
+AMP-Agent uses it to infer cleavage sites and trim proteins/smORFs into *mature peptide* candidates before downstream AMP screening.
+
+See `pepagent/USPNet/README.md` for full usage instructions and the paper citation.
 
 ## Model files (checkpoints)
 
@@ -61,7 +68,7 @@ This repo does not ship large model checkpoints by default (see `.gitignore`).
 - AMP classifier: set `PEPAGENT_AMP_MODEL_DIR` to a local directory containing the required checkpoint artifacts (e.g., `tokenizer/`, `lora_adapter/`, and weights such as `classifier_weights.pth`).
 - MIC regressor: set `PEPAGENT_MIC_MODEL_DIR` similarly (e.g., `tokenizer/`, `lora_adapter/`, and `regression_head.pth`).
 
-If you need access to pretrained/fine-tuned checkpoints used in our experiments, please contact the maintainers.
+If you need access to pretrained/fine-tuned checkpoints used in our experiments, please contact the repository owner via email.
 
 ## Data and outputs
 
