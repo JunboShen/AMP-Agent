@@ -16,11 +16,6 @@ This project uses an AutoGen-style agent team (Planner/Critic/ML_Coder/Executor/
 
 The high-level pipeline is captured in `pepagent/workspace/amp_pipeline_diagram.mmd` (Mermaid).
 
-## Demos (notebooks)
-
-- `pepagent/code_exp.ipynb`: example “coder agent” workflow for generating AMP model training/inference code.
-- `pepagent/exp1.ipynb`: example screening workflow (FASTA -> AMP candidates -> MIC prediction -> optional safety/novelty analysis).
-
 Notebooks are checked in **without outputs** and read credentials from environment variables.
 
 ## Quickstart
@@ -35,18 +30,12 @@ Notebooks are checked in **without outputs** and read credentials from environme
 3) Run script workflows (recommended):
 
 ```bash
-python pepagent/exp_amp.py
 python pepagent/exp_afp_benchmark_screening.py --input-fasta <input.faa> --top-k 100
 python pepagent/exp2_afp_benchmark_screening.py --input-fasta <input.faa> --top-k 600
 python pepagent/exp_afp_benchmark_optimization.py --input-csv <screened.csv>
 python pepagent/exp2_afp_benchmark_optimization.py --input-csv <screened.csv>
 python pepagent/exp_afp_metagenomics.py --input-fasta <large_input.faa>
 ```
-
-4) Optional: open notebooks for interactive experiments:
-
-- `pepagent/code_exp.ipynb`
-- `pepagent/exp1.ipynb`
 
 ## Configuration
 
@@ -70,7 +59,6 @@ LLM model behavior:
 - `pepagent/agents.py`: agent definitions and orchestration wiring.
 - `pepagent/llm_config.py`: LLM/tool configuration (no credentials in-code).
 - `pepagent/agent_functions.py`: toolbox functions callable by agents (I/O helpers, screening, ranking, optimization utilities).
-- `pepagent/exp_amp.py`: AMP discovery experiment entry point.
 - `pepagent/exp_afp_benchmark_screening.py`, `pepagent/exp2_afp_benchmark_screening.py`: AFP screening benchmark scripts.
 - `pepagent/exp_afp_benchmark_optimization.py`, `pepagent/exp2_afp_benchmark_optimization.py`: AFP optimization benchmark scripts.
 - `pepagent/exp_afp_metagenomics.py`: AFP discovery workflow for metagenomics-scale inputs.
