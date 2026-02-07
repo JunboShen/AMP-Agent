@@ -1,36 +1,84 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-from __future__ import annotations
-
-import autogen
+import json
 import os
 
-# IMPORTANT: never hardcode credentials in the repo.
-# Set `OPENAI_API_KEY` (and optionally `OPENAI_BASE_URL`/`OPENAI_API_BASE`)
-# via your shell environment (or a local .env that is NOT committed).
+STRICT_MODEL = "gpt-5.2"
 
-DEFAULT_MODEL_LIST = ["gpt-4", "gpt-3.5-turbo", "gpt-3.5-turbo-16k"]
+# Force all agents to use the same model.
+os.environ["OPENAI_MODEL"] = STRICT_MODEL
+os.environ["OPENAI_MODEL_LIST"] = STRICT_MODEL
 
 
-def build_config_list(model_list: list[str] | None = None) -> list[dict]:
-    """
-    Build an Autogen config list from model names.
+def _resolve_env_placeholder(value: str | None) -> str | None:
+    """Resolve ${VAR} placeholders to actual env values when present."""
+    if not value:
+        return value
+    stripped = value.strip()
+    if stripped.startswith("${") and stripped.endswith("}"):
+        ref = stripped[2:-1].strip()
+        return os.environ.get(ref)
+    return value
 
-    This is best-effort to keep `import pepagent.llm_config` working even when
-    the user hasn't configured credentials yet.
-    """
+
+# Respect externally provided environment variables; do not override secrets here.
+env_key = _resolve_env_placeholder(os.environ.get("OPENAI_API_KEY"))
+if not env_key:
+    env_key = _resolve_env_placeholder(os.environ.get("OPENAI_APIKEY"))
+if env_key:
+    os.environ["OPENAI_API_KEY"] = env_key
+try:
+    import autogen
+except ModuleNotFoundError as exc:  # pragma: no cover - autogen optional for non-agent usage
+    autogen = None
+
+
+def _model_list_from_env() -> list[str]:
+    # Enforce a single, strict model for all agents.
+    return [STRICT_MODEL]
+
+
+def _build_config_list() -> list[dict]:
+    models = _model_list_from_env()
+    config_list = []
     try:
-        return autogen.config_list_from_models(model_list=model_list or DEFAULT_MODEL_LIST)
+        config_list = autogen.config_list_from_models(model_list=models)
     except Exception:
+        config_list = []
+    if config_list:
+        return config_list
+
+    api_key = _resolve_env_placeholder(os.environ.get("OPENAI_API_KEY"))
+    if not api_key:
+        api_key = _resolve_env_placeholder(os.environ.get("OPENAI_APIKEY"))
+    if not api_key:
         return []
+    base_url = os.environ.get("OPENAI_API_BASE") or os.environ.get("OPENAI_BASE_URL")
+    config = {"model": models[0], "api_key": api_key}
+    if base_url:
+        config["base_url"] = base_url
+    return [config]
 
 
-config_list = build_config_list()
+if autogen is None:
+    raise ModuleNotFoundError(
+        "autogen is not installed. Install it (e.g., `pip install pyautogen`) to use llm_config."
+    )
 
-llm_config = {
-    # Generate functions config for the Tool
-    "functions": [
+config_list = _build_config_list()
+if not config_list:
+    raw_key = os.environ.get("OPENAI_API_KEY")
+    placeholder_hint = ""
+    if raw_key and raw_key.strip().startswith("${") and raw_key.strip().endswith("}"):
+        placeholder_hint = f" Detected placeholder {raw_key}; resolve or replace it with a real key."
+    raise ValueError(
+        "No LLM configuration found. Set OPENAI_API_KEY (and optionally OPENAI_MODEL/OPENAI_MODEL_LIST)."
+        + placeholder_hint
+    )
+
+# Generate tool/function schema once and reuse.
+FUNCTIONS = [
 
         {
             "name": "get_FASTA_from_name",
@@ -221,13 +269,14 @@ llm_config = {
         },
 {
   "name": "augment_with_toxicity_and_hemolysis",
-  "description": "Append four columns to an AMP/MIC CSV by running two CLIs. Input CSV must include seq_id and sequence. Writes a single CSV (UTF-8) at `output_csv` containing the original columns plus: toxicity_score (float 0–1), toxicity_prediction ('toxic'|'non-toxic'), hemolysis_score (float 0–1), hemolysis_prediction ('hemolytic'|'non-hemolytic'). Returns a JSON STRING with paths, row counts, and column mapping used for merging.",
+  "description": "Append four columns to an AMP/MIC CSV by running two CLIs. Input CSV must include seq_id and sequence. Writes a single CSV (UTF-8) at `output_csv` containing the original columns plus: toxicity_score (float 0–1), toxicity_prediction ('Toxin'|'Non-Toxin'), hemolysis_score (float 0–1), hemolysis_prediction ('Hemolytic'|'Non-Hemolytic'). Returns a JSON STRING with paths, row counts, and column mapping used for merging.",
   "parameters": {
     "type": "object",
     "properties": {
       "input_csv": {"type": "string", "description": "Path to AMP/MIC CSV containing columns seq_id and sequence."},
       "output_csv": {"type": "string", "description": "Output CSV path to write.", "default": "amp_mic_tox_hemo.csv"},
       "work_dir": {"type": "string", "description": "Working directory for CLIs and temporary files.", "default": "./workspace"},
+      "allow_pip_install": {"type": "boolean", "description": "Allow this tool to run pip installs for numpy/scikit-learn pinning.", "default": True},
     },
     "required": ["input_csv"]
   }
@@ -241,8 +290,8 @@ llm_config = {
     "properties": {
       "input_fasta":   {"type": "string", "description": "Path to input FASTA"},
       "output_csv":    {"type": "string", "description": "Path for the combined AMP+MIC CSV", "default": "amp_then_mic.csv"},
-      "min_amp_prob":  {"type": "number", "default": 0.5, "description": "Keep only AMPs with P(AMP) >= this"},
-      "top_k":         {"type": "integer", "nullable": True, "description": "If set, keep only top-k by confidence_score"},
+      "min_amp_prob":  {"type": "number", "default": 0.5, "description": "Keep only AMPs with P(AMP) >= this. Set <=0 to disable filtering."},
+      "top_k":         {"type": "integer", "nullable": True, "default": 200, "description": "If set, keep only top-k by confidence_score"},
       "work_dir": {"type": "string", "description": "Working directory for CLIs and temporary files.", "default": "./workspace"},
     },
     "required": ["input_fasta"]
@@ -427,6 +476,79 @@ llm_config = {
 	    },
 	    "required": []
 	  }
+	},
+	{
+	  "name": "generate_candidates_genetic",
+	  "description": "Select top candidates from a prior CSV and generate mutated peptide sequences for the next generation. Writes a FASTA and returns a JSON summary with path and count.",
+	  "parameters": {
+	    "type": "object",
+	    "properties": {
+	      "input_csv":   { "type": "string", "description": "Input CSV containing at least a 'sequence' column.", "default": "amp_mic_tox_hemo.csv" },
+	      "output_fasta":{ "type": "string", "description": "Output FASTA path for the next generation.", "default": "generation_next.fasta" },
+	      "top_k":       { "type": "integer", "description": "How many top sequences to use as parents.", "default": 10, "minimum": 1 },
+      "mutation_rate": { "type": "number", "description": "Per-sequence mutation rate (0–1).", "default": 0.1, "minimum": 0.0, "maximum": 1.0 },
+      "offspring_per_parent": { "type": "integer", "description": "How many mutated offspring to create per parent.", "default": 5, "minimum": 1 },
+	      "work_dir":    { "type": "string", "description": "Base directory used to resolve relative paths.", "default": "./workspace" }
+	    },
+	    "required": ["input_csv"]
+	  }
+	},
+	{
+	  "name": "generate_candidates_textgrad",
+	  "description": "Refine top candidates using TextGrad (LLM-based textual gradients) and output a next-generation FASTA. Returns a JSON summary with path, count, and engine.",
+	  "parameters": {
+	    "type": "object",
+	    "properties": {
+	      "input_csv":   { "type": "string", "description": "Input CSV containing at least a 'sequence' column.", "default": "amp_mic_tox_hemo.csv" },
+	      "output_fasta":{ "type": "string", "description": "Output FASTA path for the next generation.", "default": "generation_next.fasta" },
+	      "top_k":       { "type": "integer", "description": "How many top sequences to consider for optimization.", "default": 10, "minimum": 1 },
+	      "optimize_top":{ "type": "integer", "description": "How many top sequences to optimize with TextGrad.", "default": 5, "minimum": 1 },
+	      "steps":       { "type": "integer", "description": "Number of TextGrad optimization steps.", "default": 2, "minimum": 1 },
+	      "engine":      { "type": "string", "description": "TextGrad engine/model name. If omitted, uses TEXTGRAD_ENGINE or a default.", "default": "gpt-5.2" },
+	      "min_len":     { "type": "integer", "description": "Minimum sequence length to keep.", "default": 10, "minimum": 1 },
+	      "max_len":     { "type": "integer", "description": "Maximum sequence length to keep.", "default": 120, "minimum": 1 },
+	      "work_dir":    { "type": "string", "description": "Base directory used to resolve relative paths.", "default": "./workspace" },
+	      "score_with_llm": { "type": "boolean", "description": "If true, re-score candidates with an LLM before optimization.", "default": True },
+	      "fallback_to_genetic": { "type": "boolean", "description": "If true, fall back to genetic optimizer when TextGrad is unavailable.", "default": True },
+	      "mutation_rate": { "type": "number", "description": "Mutation rate for fallback genetic optimization.", "default": 0.1, "minimum": 0.0, "maximum": 1.0 },
+	      "offspring_per_parent": { "type": "integer", "description": "Offspring count per parent for fallback genetic optimization.", "default": 5, "minimum": 1 }
+	    },
+	    "required": ["input_csv"]
+	  }
+	},
+	{
+	  "name": "analyze_generation_stats",
+	  "description": "Analyze AMP screening outputs (CSV) to report potency, toxicity rate, and diversity. Returns a text report.",
+	  "parameters": {
+	    "type": "object",
+	    "properties": {
+	      "input_csv": { "type": "string", "description": "Input CSV to analyze.", "default": "amp_mic_tox_hemo.csv" },
+	      "work_dir":  { "type": "string", "description": "Base directory used to resolve relative paths.", "default": "./workspace" }
+	    },
+	    "required": ["input_csv"]
+	  }
+	},
+	{
+	  "name": "codex_mcp_run",
+	  "description": "Run Codex via MCP to make code changes and run commands. Returns a JSON string with the Codex response.",
+	  "parameters": {
+	    "type": "object",
+	    "properties": {
+	      "prompt": { "type": "string", "description": "Instruction prompt for Codex." },
+	      "cwd": { "type": "string", "description": "Working directory for Codex session.", "default": "." },
+	      "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write" },
+	      "approval_policy": { "type": "string", "enum": ["untrusted", "on-failure", "on-request", "never"], "default": "never" },
+	      "model": { "type": "string", "description": "Optional model override, e.g. gpt-5.2-codex." },
+	      "profile": { "type": "string", "description": "Optional Codex config profile name." },
+	      "config": { "type": "object", "description": "Optional Codex config overrides." },
+	      "developer_instructions": { "type": "string", "description": "Optional developer instructions injected into Codex." },
+	      "base_instructions": { "type": "string", "description": "Optional base instructions for Codex." },
+	      "compact_prompt": { "type": "string", "description": "Optional compact prompt override for Codex." },
+	      "drop_openai_key": { "type": "boolean", "description": "If true, remove OPENAI_API_KEY/BASE vars from Codex MCP env to force Codex CLI auth.", "default": False },
+	      "timeout_sec": { "type": "integer", "description": "Timeout (seconds) for the Codex MCP call.", "default": 300, "minimum": 10 }
+	    },
+	    "required": ["prompt"]
+	  }
 	}
 # {
 #     "name": "mic_predict_csv",
@@ -496,7 +618,12 @@ llm_config = {
 #     "required": ["input_fasta", "output_csv"]
 #   }
 # },
-    ],
+]
+
+TOOLS = [{"type": "function", "function": f} for f in FUNCTIONS]
+
+llm_config = {
+    "tools": TOOLS,
     "config_list": config_list,  # Assuming you have this defined elsewhere
     # "request_timeout": 120,
 }

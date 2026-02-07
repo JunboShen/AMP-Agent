@@ -1,21 +1,18 @@
 #!/usr/bin/env python
 # coding: utf-8
-from __future__ import annotations
-
-import os
+from rdkit import Chem
+from rdkit.Chem import AllChem
 from pathlib import Path
 
-try:
-    from rdkit import Chem
-    from rdkit.Chem import AllChem
-except ModuleNotFoundError:
-    Chem = None
-    AllChem = None
+workspace_dir = './workspace/'
+device = 'cpu'
 
-_PKG_DIR = Path(__file__).resolve().parent
-workspace_dir = os.getenv("PEPAGENT_WORKSPACE_DIR", str(_PKG_DIR / "workspace"))
-device = os.getenv("PEPAGENT_DEVICE", "cpu")
-os.makedirs(workspace_dir, exist_ok=True)
+import os
+
+try:
+    os.mkdir(workspace_dir)
+except:
+    pass
 
 import pandas as pd
 try:
@@ -23,9 +20,34 @@ try:
 except ImportError:
     import utils
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+_PARENT_ROOT = REPO_ROOT.parent
+
+def _pick_existing_path(candidates: list[Path]) -> str:
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    # fallback to first candidate for clearer error messages downstream
+    return str(candidates[0])
+
+DEFAULT_AMP_MODEL_DIR = _pick_existing_path([
+    REPO_ROOT / "AMP_fungus" / "checkpoint" / "ESM2_650M_adapted_lora_full_dataset",
+    _PARENT_ROOT / "AMP_fungus" / "checkpoint" / "ESM2_650M_adapted_lora_full_dataset",
+])
+DEFAULT_MIC_MODEL_DIR = _pick_existing_path([
+    REPO_ROOT / "AMP_fungus" / "checkpoint" / "ESM2_650M_adapted_lora_MIC",
+    _PARENT_ROOT / "AMP_fungus" / "checkpoint" / "ESM2_650M_adapted_lora_MIC",
+])
+DEFAULT_SKIN_FASTA = _pick_existing_path([
+    REPO_ROOT / "AMP_fungus" / "data" / "skin" / "skin.fasta",
+    _PARENT_ROOT / "AMP_fungus" / "data" / "skin" / "skin.fasta",
+])
+
 from Bio.PDB import PDBParser, DSSP
 from collections import Counter
 import json
+
+import openai
 
 try:
     import autogen
@@ -80,31 +102,6 @@ def retrieve_content(message, n_results=3):
 #     # print(str(response))
 #
 #     return response if response else message
-
-
-
-def coords_from_SMILES(SMILES='CCC'):
-    if Chem is None or AllChem is None:
-        raise ModuleNotFoundError("rdkit is required for coords_from_SMILES; install `rdkit` first.")
-    mol = Chem.MolFromSmiles(SMILES)
-    mol = Chem.AddHs(mol)
-    Chem.SanitizeMol(mol, Chem.rdmolops.SanitizeFlags.SANITIZE_ADJUSTHS)
-    Chem.SanitizeMol(mol)
-    AllChem.EmbedMolecule(mol)
-
-    try:
-        AllChem.UFFOptimizeMolecule(mol)
-
-    except:
-        print("UFF optimization did not work.")
-    ch = []
-
-    mol.GetConformer()
-    for i, atom in enumerate(mol.GetAtoms()):
-        positions = mol.GetConformer().GetAtomPosition(i)
-        ch.append(f'{atom.GetSymbol()} {positions.x:12.4} {positions.y:12.4} {positions.z:12.4}')
-    return ch
-
 
 def add_missing_column(file_path):
     # Read all lines from the file
@@ -348,6 +345,22 @@ from transformers.modeling_outputs import ModelOutput
 from peft import PeftModel
 from tqdm import tqdm
 
+# Reuse heavy models within the same process to avoid repeated load times.
+_AMP_PREDICTOR_CACHE: dict[tuple[str, str], "AMPPredictor"] = {}
+_MIC_PREDICTOR_CACHE: dict[tuple[str, str], "MICPredictor"] = {}
+
+def _get_amp_predictor(model_dir: str, device: str):
+    key = (os.path.abspath(model_dir), device)
+    if key not in _AMP_PREDICTOR_CACHE:
+        _AMP_PREDICTOR_CACHE[key] = AMPPredictor(model_dir=model_dir, device=device)
+    return _AMP_PREDICTOR_CACHE[key]
+
+def _get_mic_predictor(model_dir: str, device: str):
+    key = (os.path.abspath(model_dir), device)
+    if key not in _MIC_PREDICTOR_CACHE:
+        _MIC_PREDICTOR_CACHE[key] = MICPredictor(model_dir=model_dir, device=device)
+    return _MIC_PREDICTOR_CACHE[key]
+
 
 # -----------------------
 #   Model definitions
@@ -586,7 +599,7 @@ class MICPredictor:
 #   Agent-callable tool
 # -----------------------
 def mic_predict_csv(
-    model_dir: str | None = None,
+    model_dir=DEFAULT_MIC_MODEL_DIR,
     input_csv: str = None,
     output_prefix="./mic_predictions",
     batch_size: int = 256,
@@ -603,12 +616,6 @@ def mic_predict_csv(
     responses are strings, not lists/dicts).
     """
     try:
-        model_dir = model_dir or os.getenv("PEPAGENT_MIC_MODEL_DIR")
-        if not model_dir:
-            raise ValueError(
-                "Missing MIC model directory. Pass `model_dir=...` or set "
-                "environment variable `PEPAGENT_MIC_MODEL_DIR`."
-            )
         predictor = MICPredictor(model_dir=model_dir, device=device)
         outputs = predictor.predict_csv(
             input_csv=input_csv,
@@ -882,8 +889,8 @@ class AMPPredictor:
 #   Agent-callable tool
 # -----------------------
 def amp_predict_fasta(
-    model_dir: str | None = None,
-    input_fasta: str | None = None,
+    model_dir=DEFAULT_AMP_MODEL_DIR,
+    input_fasta=DEFAULT_SKIN_FASTA,
     output_prefix="./amp_predictions",
     device: str = "auto",
     batch_size: int = 256,
@@ -895,14 +902,6 @@ def amp_predict_fasta(
     Returns a JSON STRING summarizing outputs (paths, counts, device).
     """
     try:
-        model_dir = model_dir or os.getenv("PEPAGENT_AMP_MODEL_DIR")
-        if not model_dir:
-            raise ValueError(
-                "Missing AMP model directory. Pass `model_dir=...` or set "
-                "environment variable `PEPAGENT_AMP_MODEL_DIR`."
-            )
-        if not input_fasta:
-            raise ValueError("Missing input FASTA. Pass `input_fasta=...`.")
         predictor = AMPPredictor(model_dir=model_dir, device=device)
         outputs = predictor.predict_fasta(
             fasta_path=input_fasta,
@@ -928,12 +927,25 @@ def amp_predict_fasta(
         }
         return json.dumps(summary)
     except Exception as e:
+        # If anything fails, fall back to passthrough CSV so the pipeline can continue.
+        try:
+            if "df_in" in locals() and "abs_out" in locals() and "abs_in" in locals():
+                df_in.to_csv(abs_out, index=False)
+                return json.dumps({
+                    "status": "skipped",
+                    "reason": f"Toxicity/hemolysis tools failed: {e}",
+                    "input_csv": abs_in,
+                    "output_csv": abs_out,
+                    "num_rows": int(len(df_in)),
+                })
+        except Exception:
+            pass
         return json.dumps({"status": "error", "error": str(e)})
 
 
 def amp_then_mic_from_fasta(
-    amp_model_dir: str | None = None,
-    mic_model_dir: str | None = None,
+    amp_model_dir: str = DEFAULT_AMP_MODEL_DIR,
+    mic_model_dir: str = DEFAULT_MIC_MODEL_DIR,
     input_fasta: str = None,
     output_csv: str = "./amp_then_mic.csv",
     work_dir: str = workspace_dir,
@@ -942,20 +954,21 @@ def amp_then_mic_from_fasta(
     mic_batch_size: int = 256,
     chunk_size: int = 100_000,
     skip_chunks: int = 0,
-    min_amp_prob: float = 0.50,
+    min_amp_prob: float = 0.5,
     top_k: int | None = None,
 ) -> str:
     """
     Agent-callable pipeline:
       1) AMP classify sequences from FASTA (ESM2+LoRA)
       2) Keep only predicted AMPs with amp_probability >= min_amp_prob
-      3) Rank by AMP confidence_score (desc), optionally keep top_k
+      3) Rank by AMP confidence_score (desc), optionally keep top_k when provided
       4) MIC regression (ESM2+LoRA) on the remaining AMPs
       5) Save a single CSV with AMP + MIC results; return JSON string summary.
 
     Notes:
     - `work_dir` is the base directory where FASTA is read from and CSV is written to.
       Relative `input_fasta`/`output_csv` paths are resolved against `work_dir`.
+    - If min_amp_prob <= 0, the AMP filter is disabled (pass-through).
 
     Returns: JSON string (for Autogen), including output file path and counts.
     """
@@ -964,34 +977,30 @@ def amp_then_mic_from_fasta(
     from Bio import SeqIO
 
     try:
-        amp_model_dir = amp_model_dir or os.getenv("PEPAGENT_AMP_MODEL_DIR")
-        mic_model_dir = mic_model_dir or os.getenv("PEPAGENT_MIC_MODEL_DIR")
-        if not amp_model_dir:
-            raise ValueError(
-                "Missing AMP model directory. Pass `amp_model_dir=...` or set "
-                "environment variable `PEPAGENT_AMP_MODEL_DIR`."
-            )
-        if not mic_model_dir:
-            raise ValueError(
-                "Missing MIC model directory. Pass `mic_model_dir=...` or set "
-                "environment variable `PEPAGENT_MIC_MODEL_DIR`."
-            )
-
         # ---------- Resolve paths relative to work_dir ----------
         work_dir = os.path.abspath(work_dir or ".")
+        if not os.path.isdir(work_dir) or not os.access(work_dir, os.W_OK):
+            fallback = os.path.abspath(os.path.join(os.path.dirname(__file__), "workspace"))
+            if os.path.isdir(fallback) and os.access(fallback, os.W_OK):
+                work_dir = fallback
         if input_fasta is None:
             raise ValueError("input_fasta must be provided")
         if not os.path.isabs(input_fasta):
             input_fasta = os.path.join(work_dir, input_fasta)
         if not os.path.exists(input_fasta):
-            raise FileNotFoundError(f"FASTA not found: {input_fasta}")
+            # Fallback: if an absolute path was provided but is invalid, try basename under work_dir.
+            candidate = os.path.join(work_dir, os.path.basename(input_fasta))
+            if os.path.exists(candidate):
+                input_fasta = candidate
+            else:
+                raise FileNotFoundError(f"FASTA not found: {input_fasta}")
 
         if not os.path.isabs(output_csv):
             output_csv = os.path.join(work_dir, output_csv)
 
-        # ---------- Load predictors ----------
-        amp_pred = AMPPredictor(model_dir=amp_model_dir, device=device)
-        mic_pred = MICPredictor(model_dir=mic_model_dir, device=device)
+        # ---------- Load predictors (cached within process) ----------
+        amp_pred = _get_amp_predictor(model_dir=amp_model_dir, device=device)
+        mic_pred = _get_mic_predictor(model_dir=mic_model_dir, device=device)
 
         # ---------- Stream FASTA in chunks; run AMP ----------
         total = 0
@@ -1038,7 +1047,12 @@ def amp_then_mic_from_fasta(
         amp_all = pd.concat(amp_rows, ignore_index=True)
 
         # ---------- Filter to AMPs by label + probability threshold ----------
-        amp_filtered = amp_all[(amp_all["prediction"] == "AMP") & (amp_all["amp_probability"] >= float(min_amp_prob))]
+        min_amp_prob = float(min_amp_prob)
+        if min_amp_prob <= 0.0:
+            # Allow full pass-through when the threshold is explicitly disabled.
+            amp_filtered = amp_all.copy()
+        else:
+            amp_filtered = amp_all[(amp_all["prediction"] == "AMP") & (amp_all["amp_probability"] >= min_amp_prob)]
 
         # If nothing passes the filter:
         if amp_filtered.empty:
@@ -1064,8 +1078,27 @@ def amp_then_mic_from_fasta(
 
         # ---------- Rank by confidence_score (desc) ----------
         amp_filtered = amp_filtered.sort_values("confidence_score", ascending=False)
+        pre_topk_count = int(len(amp_filtered))
         if top_k is not None and top_k > 0:
-            amp_filtered = amp_filtered.head(top_k)
+            pre_factor_env = os.environ.get("AMP_PRE_SAFETY_FACTOR")
+            if pre_factor_env is not None and str(pre_factor_env).strip() != "":
+                try:
+                    pre_factor = float(pre_factor_env)
+                except Exception:
+                    pre_factor = 1.0
+            else:
+                # Auto-expand small top_k to preserve safety/novelty options before ranking.
+                # This keeps runtime reasonable while avoiding over-truncation.
+                if top_k <= 200 and len(amp_filtered) >= int(top_k * 3):
+                    pre_factor = 5.0
+                else:
+                    pre_factor = 1.0
+            if pre_factor > 1:
+                expanded_k = int(top_k * pre_factor)
+                amp_filtered = amp_filtered.head(min(expanded_k, len(amp_filtered)))
+            else:
+                amp_filtered = amp_filtered.head(top_k)
+        pre_safety_pool_size = int(len(amp_filtered))
 
         # ---------- Prepare inputs for MIC ----------
         seq_ids = amp_filtered["seq_id"].astype(str).tolist()
@@ -1102,7 +1135,18 @@ def amp_then_mic_from_fasta(
         mic_df.to_csv(output_csv, index=False)
 
         # ---------- Build JSON summary ----------
-        preview = mic_df.head(3).to_dict(orient="records")
+        note = None
+        if top_k is not None and top_k > 0 and pre_safety_pool_size < pre_topk_count:
+            note = (
+                "Top_k was applied before safety/novelty scoring. "
+                "If safety is critical, consider deferring downselection until after safety ranking "
+                "or using a broader pre-safety pool."
+            )
+        if top_k is not None and top_k > 0 and pre_safety_pool_size > top_k:
+            note = (note + " " if note else "") + (
+                f"Auto-expanded pre-safety pool to {pre_safety_pool_size} for safer reranking."
+            )
+
         summary = {
             "status": "ok",
             "device": str(amp_pred.device),
@@ -1111,10 +1155,11 @@ def amp_then_mic_from_fasta(
             "num_predicted_amps": int(len(mic_df)),
             "filter_min_amp_prob": float(min_amp_prob),
             "top_k": top_k,
+            "pre_safety_pool_size": pre_safety_pool_size,
             "output_file": os.path.abspath(output_csv),
-            "columns": list(mic_df.columns),
-            "preview_rows": preview,
         }
+        if note:
+            summary["note"] = note
         return json.dumps(summary)
 
     except Exception as e:
@@ -1281,6 +1326,7 @@ def augment_with_toxicity_and_hemolysis(
     hemo_display: int = 2,
     hemo_window_len: int = 8,
     keep_intermediates: bool = True,  # preserved for API compatibility (files are removed)
+    allow_pip_install: bool = True,
     # required pins
     required_sklearn_version: str = "1.0.2",
     required_numpy_version: str = "1.23.5",
@@ -1293,6 +1339,8 @@ def augment_with_toxicity_and_hemolysis(
       - toxicity_prediction ('Toxin'|'Non-Toxin')
       - hemolysis_score (float 0–1)           [from HemoPI2 'Hybrid Score' (or other score fallback)]
       - hemolysis_prediction ('Hemolytic'|'Non-Hemolytic')
+      - safety_score (float 0–1)              [1 - mean(toxicity_score, hemolysis_score), higher is safer]
+      - safety_penalty (float 0–1)            [(1-toxicity_score)*(1-hemolysis_score), stronger penalty]
 
     Returns a JSON STRING with paths, row counts, and column mapping metadata.
     """
@@ -1303,12 +1351,23 @@ def augment_with_toxicity_and_hemolysis(
         os.makedirs(os.path.dirname(abs_out) or ".", exist_ok=True)
         if not os.path.exists(abs_in):
             return json.dumps({"status": "error", "error": f"Input CSV not found: {abs_in}"})
-        if shutil.which("toxinpred3") is None:
-            return json.dumps({"status": "error", "error": "toxinpred3 CLI not found on PATH."})
-        if shutil.which("hemopi2_classification") is None:
-            return json.dumps({"status": "error", "error": "hemopi2_classification CLI not found on PATH."})
 
         df_in = pd.read_csv(abs_in)
+
+        def _skip(reason: str):
+            df_in.to_csv(abs_out, index=False)
+            return json.dumps({
+                "status": "skipped",
+                "reason": reason,
+                "input_csv": abs_in,
+                "output_csv": abs_out,
+                "num_rows": int(len(df_in)),
+            })
+
+        if shutil.which("toxinpred3") is None:
+            return _skip("toxinpred3 CLI not found on PATH.")
+        if shutil.which("hemopi2_classification") is None:
+            return _skip("hemopi2_classification CLI not found on PATH.")
 
         # --- Detect input ID & sequence columns robustly
         id_in = None
@@ -1348,14 +1407,24 @@ def augment_with_toxicity_and_hemolysis(
         need_sklearn_pin = (prev_sklearn or "") != required_sklearn_version
         notes = []
 
-        if need_numpy_pin:
-            _run_command(f"{shlex.quote(sys.executable)} -m pip install --no-input numpy=={required_numpy_version}",
-                         work_dir=work_dir, stream=False, timeout=1800)
-            notes.append(f"Pinned numpy=={required_numpy_version}")
-        if need_sklearn_pin:
-            _run_command(f"{shlex.quote(sys.executable)} -m pip install --no-input scikit-learn=={required_sklearn_version}",
-                         work_dir=work_dir, stream=False, timeout=1800)
-            notes.append(f"Pinned scikit-learn=={required_sklearn_version}")
+        if allow_pip_install:
+            if need_numpy_pin:
+                try:
+                    _run_command(f"{shlex.quote(sys.executable)} -m pip install --no-input numpy=={required_numpy_version}",
+                                 work_dir=work_dir, stream=False, timeout=1800)
+                    notes.append(f"Pinned numpy=={required_numpy_version}")
+                except RuntimeError as e:
+                    notes.append(f"Skip numpy pin: {e}")
+            if need_sklearn_pin:
+                try:
+                    _run_command(f"{shlex.quote(sys.executable)} -m pip install --no-input scikit-learn=={required_sklearn_version}",
+                                 work_dir=work_dir, stream=False, timeout=1800)
+                    notes.append(f"Pinned scikit-learn=={required_sklearn_version}")
+                except RuntimeError as e:
+                    notes.append(f"Skip scikit-learn pin: {e}")
+        else:
+            if need_numpy_pin or need_sklearn_pin:
+                notes.append("Skipped numpy/scikit-learn pinning (allow_pip_install=False).")
 
         # --- ToxinPred3.0
         toxin_csv_abs = os.path.abspath(os.path.join(work_dir, "toxinpred_out.csv"))
@@ -1489,7 +1558,15 @@ def augment_with_toxicity_and_hemolysis(
         df_aug = df_aug.merge(hemo_out, left_on=id_in, right_on="merge_id", how="left")
         df_aug = df_aug.drop(columns=["merge_id"], errors="ignore")
 
-        # Write final single CSV with original AMP/MIC cols + 4 new columns
+        # Derive safety columns (soft signals, no hard filtering)
+        tox_series = pd.to_numeric(df_aug.get("toxicity_score"), errors="coerce")
+        hemo_series = pd.to_numeric(df_aug.get("hemolysis_score"), errors="coerce")
+        tox_filled = tox_series.fillna(0.5)
+        hemo_filled = hemo_series.fillna(0.5)
+        df_aug["safety_score"] = 1.0 - pd.concat([tox_filled, hemo_filled], axis=1).mean(axis=1)
+        df_aug["safety_penalty"] = (1.0 - tox_filled) * (1.0 - hemo_filled)
+
+        # Write final single CSV with original AMP/MIC cols + safety columns
         df_aug.to_csv(abs_out, index=False)
 
         # --- Cleanup: remove temp FASTA and tool CSVs (plus common scratch files)
@@ -1580,11 +1657,12 @@ def python_repl_csv(csv_path: str, code: str, save_csv: Optional[str] = None, wo
         df = pd.read_csv(in_csv)
         before_shape = list(df.shape)
 
-        # Build a minimal execution environment, preloading df and pandas
-        env = {"pd": pd, "df": df}
+        # Build a minimal execution environment, preloading df/pandas/numpy.
+        # Use the same dict for globals/locals so helper functions can see these names.
+        env = {"pd": pd, "df": df, "np": np}
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
-            exec(code, {}, env)  # df is in locals via env; user must print if they want textual output
+            exec(code, env, env)  # df/pd/np are available in globals and locals
 
         # Collect outputs
         out = {
@@ -1928,7 +2006,7 @@ def _seq_identity(s1: str, s2: str) -> float:
 @torch.no_grad()
 def amp_esm_similarity_and_sequence_identity(
     pred_csv: str = "amp_mic_tox_hemo.csv",     # metagenomics predictions
-    verified_csv: str = "fetched_amps.csv",     # verified AMPs
+    verified_csv: str = "fetched_amps.csv",     # verified AMPs (CSV or FASTA)
     # columns
     pred_seq_col: str = "sequence",
     ver_seq_col: str  = "sequence",
@@ -1961,11 +2039,47 @@ def amp_esm_similarity_and_sequence_identity(
         base = os.path.abspath(work_dir)
         os.makedirs(base, exist_ok=True)
         pred_path = pred_csv if os.path.isabs(pred_csv) else os.path.join(base, pred_csv)
-        ver_path  = verified_csv if os.path.isabs(verified_csv) else os.path.join(base, verified_csv)
+        ver_path = verified_csv if os.path.isabs(verified_csv) else os.path.join(base, verified_csv)
+        if not os.path.exists(ver_path) and not os.path.isabs(verified_csv):
+            repo_root = os.path.abspath(os.path.join(base, os.pardir))
+            alt_path = os.path.join(repo_root, verified_csv)
+            if os.path.exists(alt_path):
+                ver_path = alt_path
 
-        # Load CSVs (keep a raw copy to preserve all rows)
+        # Load predictions (keep a raw copy to preserve all rows)
         pred_raw = pd.read_csv(pred_path)
-        ver_df   = pd.read_csv(ver_path)
+
+        # Load verified AFPs (CSV or FASTA)
+        ver_ext = os.path.splitext(ver_path)[1].lower()
+
+        def _read_fasta_to_df(path: str) -> pd.DataFrame:
+            ids: List[str] = []
+            seqs: List[str] = []
+            seq_id = None
+            seq_lines: List[str] = []
+            with open(path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line.startswith(">"):
+                        if seq_id is not None:
+                            seqs.append("".join(seq_lines))
+                            ids.append(seq_id)
+                        header = line[1:].strip()
+                        seq_id = header.split()[0] if header else f"ver_{len(ids)}"
+                        seq_lines = []
+                    else:
+                        seq_lines.append(line)
+                if seq_id is not None:
+                    seqs.append("".join(seq_lines))
+                    ids.append(seq_id)
+            return pd.DataFrame({"seq_id": ids, "sequence": seqs})
+
+        if ver_ext in {".fa", ".fasta", ".faa", ".fsa", ".fas"}:
+            ver_df = _read_fasta_to_df(ver_path)
+        else:
+            ver_df = pd.read_csv(ver_path)
 
         # Basic checks
         if pred_seq_col not in pred_raw.columns:
@@ -2381,25 +2495,401 @@ def write_mature_faa_by_predicted_cleavage(
 
     except Exception as e:
         return _err(e)
+import random
 
+# --- 1. OPTIMIZER TOOL: Genetic Algorithm Generator ---
+def generate_candidates_genetic(
+    input_csv: str,
+    output_fasta: str = "generation_next.fasta",
+    top_k: int = 10,
+    mutation_rate: float = 0.1,
+    offspring_per_parent: int = 5,
+    work_dir: str = workspace_dir
+) -> str:
+    """
+    Selects top candidates from the previous generation and mutates them 
+    to create a new batch. 
+    """
+    try:
+        csv_path = os.path.join(work_dir, input_csv)
+        if not os.path.exists(csv_path):
+            return json.dumps({"status": "error", "error": f"File not found: {csv_path}"})
+        
+        df = pd.read_csv(csv_path)
+        
+        # Simple ranking heuristic (Customise this based on current objectives if needed)
+        # Here we rank by AMP probability (desc) and MIC (asc)
+        if "amp_probability" in df.columns:
+            df = df.sort_values(by=["amp_probability"], ascending=False)
+        
+        # Select parents
+        parents = df.head(top_k)["sequence"].tolist()
+        if not parents:
+            return json.dumps({"status": "error", "error": "No parents found."})
+
+        new_sequences = set()
+        amino_acids = "ACDEFGHIKLMNPQRSTVWY"
+
+        # Generate offspring with at least one mutation to encourage diversity
+        for p in parents:
+            new_sequences.add(p)
+            for _ in range(max(1, int(offspring_per_parent))):
+                seq_list = list(p)
+                if not seq_list:
+                    continue
+                num_mut = max(1, int(round(len(seq_list) * mutation_rate)))
+                num_mut = min(num_mut, len(seq_list))
+                positions = random.sample(range(len(seq_list)), k=num_mut)
+                for pos in positions:
+                    orig = seq_list[pos]
+                    choices = [aa for aa in amino_acids if aa != orig]
+                    seq_list[pos] = random.choice(choices) if choices else orig
+                new_sequences.add("".join(seq_list))
+        
+        # Save to FASTA for the next screening round
+        out_path = os.path.join(work_dir, output_fasta)
+        with open(out_path, "w") as f:
+            for i, seq in enumerate(sorted(new_sequences)):
+                f.write(f">candidate_{i}\n{seq}\n")
+                
+        return json.dumps({"status": "ok", "output_file": out_path, "count": len(new_sequences)})
+    except Exception as e:
+        return json.dumps({"status": "error", "error": str(e)})
+
+# --- 1b. OPTIMIZER TOOL: TextGrad-based Generator ---
+def generate_candidates_textgrad(
+    input_csv: str,
+    output_fasta: str = "generation_next.fasta",
+    top_k: int = 10,
+    optimize_top: int = 5,
+    steps: int = 2,
+    engine: str | None = None,
+    min_len: int = 10,
+    max_len: int = 120,
+    work_dir: str = workspace_dir,
+    score_with_llm: bool = True,
+    fallback_to_genetic: bool = True,
+    mutation_rate: float = 0.1,
+    offspring_per_parent: int = 5,
+) -> str:
+    """
+    Uses TextGrad to refine top peptide candidates from a CSV.
+    Falls back to the genetic optimizer if TextGrad is unavailable (optional).
+    """
+    import json
+    import os
+    import re
+
+    AA20 = set("ACDEFGHIKLMNPQRSTVWY")
+    HYDROPHOBIC = set("AILMFWVYC")
+
+    def normalize_sequence(seq: str) -> str:
+        seq = re.sub(r"\s+", "", str(seq).upper())
+        return "".join(aa for aa in seq if aa in AA20)
+
+    def heuristic_features(seq: str) -> tuple[int, float, float, float]:
+        length = len(seq)
+        if length == 0:
+            return 0, 0.0, 0.0, 0.0
+        pos = seq.count("K") + seq.count("R") + 0.1 * seq.count("H")
+        neg = seq.count("D") + seq.count("E")
+        net_charge = pos - neg
+        hydrophobic = sum(seq.count(aa) for aa in HYDROPHOBIC)
+        hydrophobic_frac = hydrophobic / length
+        length_score = 1.0 - min(abs(length - 40), 40) / 40.0
+        charge_score = max(min((net_charge + 1.0) / 10.0, 1.0), 0.0)
+        hydro_score = 1.0 - min(abs(hydrophobic_frac - 0.45), 0.45) / 0.45
+        heuristic_score = 0.35 * charge_score + 0.35 * hydro_score + 0.30 * length_score
+        return length, net_charge, hydrophobic_frac, heuristic_score
+
+    def parse_llm_score(text: str) -> float:
+        text = text.strip()
+        score = None
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+                score = float(data.get("score"))
+            except Exception:
+                score = None
+        if score is None:
+            num = re.findall(r"(\d+(?:\.\d+)?)", text)
+            if num:
+                score = float(num[0])
+        if score is None:
+            score = 0.0
+        return max(0.0, min(100.0, score))
+
+    def resolve_engine_name(engine_name: str) -> str:
+        native = (
+            engine_name.startswith("experimental:")
+            or engine_name.startswith("azure")
+            or engine_name.startswith("ollama")
+            or engine_name.startswith("vllm")
+            or engine_name.startswith("groq")
+            or engine_name.startswith("together-")
+            or "gpt-4" in engine_name
+            or "gpt-3.5" in engine_name
+            or "gpt-35" in engine_name
+            or "claude" in engine_name
+            or "gemini" in engine_name
+            or engine_name in {"command-r-plus", "command-r", "command", "command-light"}
+        )
+        if native:
+            return engine_name
+        return f"experimental:{engine_name}"
+
+    try:
+        csv_path = os.path.join(work_dir, input_csv) if not os.path.isabs(input_csv) else input_csv
+        if not os.path.exists(csv_path):
+            return json.dumps({"status": "error", "error": f"File not found: {csv_path}"})
+
+        df = pd.read_csv(csv_path)
+        if "sequence" not in df.columns:
+            return json.dumps({"status": "error", "error": "Input CSV missing 'sequence' column."})
+
+        rank_col = None
+        if "composite_score" in df.columns:
+            rank_col = "composite_score"
+        elif "amp_probability" in df.columns:
+            rank_col = "amp_probability"
+        elif "amp_confidence_score" in df.columns:
+            rank_col = "amp_confidence_score"
+
+        candidates = []
+        for idx, row in df.iterrows():
+            seq = normalize_sequence(row.get("sequence", ""))
+            if not seq:
+                continue
+            length, net_charge, hydro_frac, h_score = heuristic_features(seq)
+            if not (min_len <= length <= max_len):
+                continue
+            base_score = float(row.get(rank_col, h_score)) if rank_col else h_score
+            seq_id = str(row.get("seq_id", f"seq_{idx}"))
+            candidates.append(
+                {
+                    "seq_id": seq_id,
+                    "sequence": seq,
+                    "length": length,
+                    "net_charge": net_charge,
+                    "hydrophobic_frac": hydro_frac,
+                    "heuristic_score": h_score,
+                    "base_score": base_score,
+                }
+            )
+
+        if not candidates:
+            return json.dumps({"status": "error", "error": "No valid sequences available for TextGrad."})
+
+        candidates.sort(key=lambda c: c["base_score"], reverse=True)
+        candidates = candidates[: max(1, int(top_k))]
+
+        try:
+            import textgrad as tg
+            from textgrad.engine import get_engine
+        except Exception as exc:
+            if fallback_to_genetic:
+                result = generate_candidates_genetic(
+                    input_csv=input_csv,
+                    output_fasta=output_fasta,
+                    top_k=top_k,
+                    mutation_rate=mutation_rate,
+                    offspring_per_parent=offspring_per_parent,
+                    work_dir=work_dir,
+                )
+                try:
+                    payload = json.loads(result)
+                    payload["note"] = f"textgrad unavailable; fell back to genetic optimizer ({exc})."
+                    return json.dumps(payload)
+                except Exception:
+                    return result
+            return json.dumps({"status": "error", "error": f"textgrad import failed: {exc}"})
+
+        engine_name = resolve_engine_name(engine or os.environ.get("TEXTGRAD_ENGINE", "gpt-5.2"))
+        engine_obj = get_engine(engine_name, cache=False if engine_name.startswith("experimental:") else True)
+        # TextGrad may already have an engine set from a prior generation.
+        tg.set_backward_engine(engine_obj, override=True)
+
+        llm_scores = {}
+        if score_with_llm:
+            score_system_prompt = tg.Variable(
+                "You are a strict antimicrobial peptide evaluator. "
+                "Output only JSON with numeric score and a one-sentence rationale.",
+                requires_grad=False,
+                role_description="system prompt for AMP scoring",
+            )
+            scorer = tg.BlackboxLLM(engine=engine_obj, system_prompt=score_system_prompt)
+            for cand in candidates:
+                prompt = (
+                    "Score the following peptide for antimicrobial activity (0-100, higher is better). "
+                    "Consider charge, amphipathicity, hydrophobicity balance, stability, "
+                    "and likely toxicity. Respond with JSON only: "
+                    "{\"score\": <number>, \"rationale\": \"<one sentence>\"}.\n\n"
+                    f"Sequence:\n{cand['sequence']}"
+                )
+                out = scorer(tg.Variable(prompt, requires_grad=False, role_description="AMP scoring prompt"))
+                llm_scores[cand["seq_id"]] = parse_llm_score(out.get_value())
+
+        def rank_key(cand: dict) -> float:
+            if score_with_llm and cand["seq_id"] in llm_scores:
+                return llm_scores[cand["seq_id"]]
+            return cand["base_score"]
+
+        candidates.sort(key=rank_key, reverse=True)
+        to_optimize = candidates[: min(int(optimize_top), len(candidates))]
+
+        optimized = []
+        for cand in to_optimize:
+            seq = cand["sequence"]
+            constraints = [
+                f"Output only uppercase amino-acid letters (ACDEFGHIKLMNPQRSTVWY) with length exactly {cand['length']}.",
+                "No spaces, punctuation, or extra text.",
+            ]
+            role_desc = (
+                f"Antimicrobial peptide sequence (length {cand['length']}) "
+                "using only canonical amino acids."
+            )
+            seq_var = tg.Variable(seq, requires_grad=True, role_description=role_desc)
+            eval_instruction = tg.Variable(
+                "You are evaluating an antimicrobial peptide sequence. Provide concise, actionable "
+                "feedback to improve antimicrobial potency and spectrum while maintaining stability "
+                "and minimizing toxicity. Focus on cationic charge and amphipathic structure. "
+                "Do NOT rewrite the sequence; only provide feedback.",
+                requires_grad=False,
+                role_description="evaluation criteria for AMP optimization",
+            )
+            loss_fn = tg.TextLoss(eval_instruction, engine=engine_obj)
+            optimizer = tg.TextualGradientDescent(
+                parameters=[seq_var],
+                engine=engine_obj,
+                constraints=constraints,
+                verbose=0,
+            )
+            for _ in range(max(1, int(steps))):
+                loss = loss_fn(seq_var)
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                cleaned = normalize_sequence(seq_var.get_value())
+                if len(cleaned) != cand["length"]:
+                    cleaned = seq
+                seq_var.set_value(cleaned)
+            improved = seq_var.get_value()
+            optimized.append(
+                {
+                    "parent_id": cand["seq_id"],
+                    "sequence": improved,
+                    "length": cand["length"],
+                }
+            )
+
+        new_sequences = []
+        seen = set()
+        for cand in candidates:
+            seq = cand["sequence"]
+            if seq not in seen:
+                seen.add(seq)
+                new_sequences.append(("orig", cand["seq_id"], seq))
+        for idx, cand in enumerate(optimized, start=1):
+            seq = cand["sequence"]
+            if seq not in seen:
+                seen.add(seq)
+                new_sequences.append(("textgrad", cand["parent_id"], seq))
+
+        out_path = os.path.join(work_dir, output_fasta) if not os.path.isabs(output_fasta) else output_fasta
+        with open(out_path, "w") as fh:
+            for i, (method, parent_id, seq) in enumerate(new_sequences, start=1):
+                fh.write(f">candidate_{i}|{method}|parent={parent_id}\n{seq}\n")
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "output_file": out_path,
+                "count": len(new_sequences),
+                "optimized": len(optimized),
+                "engine": engine_name,
+            }
+        )
+    except Exception as e:
+        return json.dumps({"status": "error", "error": str(e)})
+
+# --- 2. ANALYZER TOOL: Population Statistics ---
+def analyze_generation_stats(
+    input_csv: str,
+    work_dir: str = workspace_dir
+) -> str:
+    """
+    Analyzes the population to detect failure modes (e.g., high toxicity, low diversity).
+    Returns a text report for the Planner.
+    """
+    try:
+        csv_path = os.path.join(work_dir, input_csv)
+        df = pd.read_csv(csv_path)
+        
+        report = []
+        report.append(f"Analysis of {len(df)} candidates:")
+
+        if len(df) == 0:
+            report.append("- No candidates available for statistics. Consider lowering the AMP threshold or increasing input diversity.")
+            return "\n".join(report)
+        
+        # 1. Potency Stats
+        if "amp_probability" in df.columns:
+            avg_amp = df["amp_probability"].mean()
+            report.append(f"- Avg AMP Probability: {avg_amp:.2f}")
+            
+        # 2. Safety Check (Reward Hacking Detection)
+        if "toxicity_prediction" in df.columns:
+            toxic_count = df[df["toxicity_prediction"] == "Toxin"].shape[0]
+            toxic_rate = toxic_count / len(df)
+            report.append(f"- Toxicity Rate: {toxic_rate:.2%}")
+            if toxic_rate > 0.3:
+                report.append(
+                    "WARNING: High toxicity detected. Consider strengthening continuous safety terms "
+                    "(toxicity_score and hemolysis_score) in the composite score, while avoiding hard filters "
+                    "or label-gated penalties."
+                )
+        if "hemolysis_prediction" in df.columns:
+            hemo_count = df[df["hemolysis_prediction"] == "Hemolytic"].shape[0]
+            hemo_rate = hemo_count / len(df)
+            report.append(f"- Hemolysis Rate: {hemo_rate:.2%}")
+            if hemo_rate > 0.3:
+                report.append(
+                    "WARNING: High hemolysis detected. Consider increasing the impact of hemolysis signals in the composite score."
+                )
+        
+        # 3. Diversity Check
+        unique_seqs = df["sequence"].nunique()
+        diversity_ratio = unique_seqs / len(df)
+        report.append(f"- Diversity Ratio: {diversity_ratio:.2f}")
+        if diversity_ratio < 0.2:
+            report.append("WARNING: Low diversity. The optimizer has collapsed to a local optimum.")
+
+        return "\n".join(report)
+    except Exception as e:
+        return json.dumps({"status": "error", "error": str(e)})
+
+
+    
 if __name__ == "__main__":
 
-	    # result_json = amp_then_mic_from_fasta(
-	    #     input_fasta="workspace/smorfs_30_100aa_part.faa",
-	    # )
+    # result_json = amp_then_mic_from_fasta(
+    #     input_fasta="./workspace/smorfs_30_100aa_part.faa",
+    
+    # )
     #test amp_identity_similarity
-    result_json = amp_identity_similarity(
-        pred_csv="amp_then_mic.csv",
-        train_fasta="data/train_set.fasta",
-    )
-    print(result_json)
-
-    # print(result_json)
-    # #test augment_with_toxicity_and_hemolysis in main
-    # result_json = augment_with_toxicity_and_hemolysis(
-    #     input_csv="amp_then_mic.csv"
+    # result_json = amp_identity_similarity(
+    #     pred_csv="amp_then_mic.csv",
+    #     train_fasta="data/train_set.fasta",
     # )
     # print(result_json)
+
+    # print(result_json)
+    #test augment_with_toxicity_and_hemolysis in main
+    result_json = augment_with_toxicity_and_hemolysis(
+        input_csv="amp_then_mic.csv"
+    )
+    print(result_json)
     #test amp_similarity_via_esm in main
     # result_json = amp_esm_similarity_and_sequence_identity(
     #
